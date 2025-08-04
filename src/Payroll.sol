@@ -2,20 +2,24 @@
 
 pragma solidity ^0.8.20;
 
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
+import {IERC20} from "src/IERC20.sol";
+import {PayTime} from "src/PayTime.sol";
 
-
-contract Payroll {
-    //errors
+/** @title Payroll Contract
+ *  @dev This contract manages employee payroll, including registration, salary payments, and access control.
+ * 
+ */
+contract Payroll is PayTime {
+    /** Errors */
     error Payroll__Unauthorized();
     error Payroll__AccessControlersCantBeMoreThanTen();
-    error Payroll__ThisEmployeeIsAlreadyRgistered();
+    error Payroll__AlreadyRgistered();
+    error Payroll__AlreadyTerminated();
+    error Payroll__Max90DaysAllowed();
+    error Payroll__RestricTedTime();
 
-    IERC20 private token;
+    /** State Variables */
+    IERC20 private immutable token;
 
     uint256 private s_smartId;
     uint256 private s_totalSalary;
@@ -25,13 +29,10 @@ contract Payroll {
     address[] private s_hrManagers;
     address payable[] private s_payrollEmployee;
 
-    // bool payrollAbilityToPay or uint256 private totalPayrollAbilityToPay
+    // bool payrollAbilityToPay or uint256 private totalPayrollAbilityToPay 
 
     struct EmployeeInfo {
         address employeeAddr;
-        string name;
-        uint256 registrationTime;
-        string positoin;
         uint256 employeeId;
         uint256 smartId;
         uint256 monthlySalaryUsd;
@@ -41,8 +42,6 @@ contract Payroll {
         address employeeAddr;
         uint256 employeeId;
         uint256 smartId;
-        string position;
-        uint256 terminationTime;
     }
 
     mapping(address => bool) public s_isControler;
@@ -52,12 +51,23 @@ contract Payroll {
     mapping(uint256 => address) public s_employeeSmartIdToAddr;
     mapping(address => TerminationInfo) public s_terminatedEmploye;
 
-    constructor(address accessControlerAddr, address _accessControlerAddr, address __accessControlerAddr, address usdtTokenAddr) {
-        require(s_accessControlers.length < 10, Payroll__AccessControlersCantBeMoreThanTen());
+    constructor(
+        address accessControlerAddr, 
+        address _accessControlerAddr, 
+        address __accessControlerAddr, 
+        address daiTokenAddr,
+        uint256 payMonthStartAfter_day,
+        uint256 numberOfPayrollStartingMonth,
+        uint256 currentYear) 
+        PayTime(payMonthStartAfter_day, numberOfPayrollStartingMonth, currentYear) 
+    {
+        require(payMonthStartAfter_day <= 90, Payroll__Max90DaysAllowed());
+        //require(s_accessControlers.length < 10, Payroll__AccessControlersCantBeMoreThanTen());
+
         s_accessControlers.push(accessControlerAddr);
         s_accessControlers.push(_accessControlerAddr);
         s_accessControlers.push(__accessControlerAddr);
-        token = IERC20(usdtTokenAddr);
+        token = IERC20(daiTokenAddr);
         s_isControler[accessControlerAddr] = true;
         s_isControler[_accessControlerAddr] = true;
         s_isControler[__accessControlerAddr] = true;
@@ -65,40 +75,40 @@ contract Payroll {
 
     modifier onlyAccessControlers() {
         require(s_isControler[msg.sender], Payroll__Unauthorized());
+        require(restrictedTime(), Payroll__RestricTedTime());
         _;
     }
 
     modifier onlyHrManagers() {
         require(s_isHr[msg.sender], Payroll__Unauthorized());
+        require(restrictedTime(), Payroll__RestricTedTime());
         _;
     }
 
     modifier onlyAccessControlersAndHrManagers() {
         require(s_isControler[msg.sender] || s_isHr[msg.sender], Payroll__Unauthorized());
+        require(restrictedTime(), Payroll__RestricTedTime());
         _;
     }
 
     modifier onlyAccessControlersAndChiefFinancialOfficer() {
         require(s_isControler[msg.sender] || s_isCFO[msg.sender], Payroll__Unauthorized());
+        require(restrictedTime(), Payroll__RestricTedTime());
         _;
     }
 
     function registerEmployee(
         address payable _employeeAddr,
-        string memory _name,
-        string memory _positoin,
         uint256 _employeeId,
-        uint256 _monthlySalaryUsd
-        ) public {
-
-        require(s_employeeLlist[_employeeAddr].employeeAddr != _employeeAddr, Payroll__ThisEmployeeIsAlreadyRgistered());
+        uint256 _monthlySalaryUsd)
+        public 
+        onlyHrManagers 
+    {
+        require(s_employeeLlist[_employeeAddr].employeeAddr != _employeeAddr, Payroll__AlreadyRgistered());
         require(s_terminatedEmploye[_employeeAddr].employeeAddr != _employeeAddr, "");
         
         EmployeeInfo memory info = EmployeeInfo ({
             employeeAddr: _employeeAddr, 
-            name: _name,
-            registrationTime: block.timestamp,
-            positoin: _positoin, 
             employeeId: _employeeId,
             smartId: s_smartId, 
             monthlySalaryUsd: _monthlySalaryUsd,
@@ -112,25 +122,18 @@ contract Payroll {
         s_totalSalary += _monthlySalaryUsd;
     }
 
-    function changeEmployeeStatus(address _employeeAddr, bool status) public {
-        if (s_terminatedEmploye[_employeeAddr].employeeAddr == _employeeAddr) {
-            //revert AlreadyTerminated
-        }
-        if (!s_employeeLlist[_employeeAddr].currentStatus == status) {
-            s_employeeLlist[_employeeAddr].currentStatus = status;
-        } else {
-            s_employeeLlist[_employeeAddr].currentStatus = status;
-        }
+    function changeEmployeeStatus(address _employeeAddr, bool status) public onlyAccessControlersAndHrManagers {
+        require(s_terminatedEmploye[_employeeAddr].employeeAddr != _employeeAddr, Payroll__AlreadyTerminated());
+        
+        s_employeeLlist[_employeeAddr].currentStatus = status;
     }
     
     // critical for payRoll. 
-    function terminatEmployee(address _employeeAddr) internal {
+    function terminatEmployee(address _employeeAddr) public onlyAccessControlersAndHrManagers {
         s_terminatedEmploye[_employeeAddr] = TerminationInfo({
             employeeAddr: _employeeAddr, 
             employeeId: s_employeeLlist[_employeeAddr].employeeId,
-            smartId: s_employeeLlist[_employeeAddr].smartId,
-            position: s_employeeLlist[_employeeAddr].positoin,
-            terminationTime: block.timestamp
+            smartId: s_employeeLlist[_employeeAddr].smartId
         });
         
         delete s_employeeSmartIdToAddr[s_employeeLlist[_employeeAddr].smartId];
@@ -138,12 +141,8 @@ contract Payroll {
         delete s_employeeLlist[_employeeAddr];
     }
 
-    function changeEmployeeSalary(address _employeeAddr, uint256 changedAmount) public {
+    function changeEmployeeSalary(address _employeeAddr, uint256 changedAmount) public onlyAccessControlersAndChiefFinancialOfficer {
         s_employeeLlist[_employeeAddr].monthlySalaryUsd = changedAmount;
-    }
-
-    function autoIncreaseSalaryAfter(uint256 month) public {
-        
     }
 
     function payPayroll() public payable {
@@ -162,18 +161,26 @@ contract Payroll {
     }
 
     function checkUpkeep(bytes calldata /* checkData */) external view returns (bool upkeepNeeded, bytes memory /* performData */) {
-
+        upkeepNeeded = true;
         return (upkeepNeeded, "");
     }
 
     function performUpkeep(bytes calldata /* performData */) external {
-        payRoll();
+        payrollStarter();
+        nextMonthStarter();
     }
 
-    function claimSalary() public {}
 
-    function registerHrManager() public {}
+    function registerHrManager(address hrManager) public {
 
-    //function register() public {}
+    }
+
+    function claimSalary() public {
+        //require();
+        // address payable payer = s_payrollEmployee[i];
+        // uint256 amount = s_employeeLlist[payer].monthlySalaryUsd;
+
+        // bool sucsess = token.transfer(payer, amount);
+    }
 
 }
